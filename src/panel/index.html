@@ -25,8 +25,12 @@
       </section>
 
       <section class="view view-transcribing">
-        <div class="spinner"></div>
-        <p class="status-line">Transcribing…</p>
+        <div class="top">
+          <span class="record-dot grey"></span>
+          <span class="title">Transcribing</span>
+          <span class="timer" id="etaTimer">≈</span>
+        </div>
+        <canvas id="transcribeMeter" width="512" height="72"></canvas>
       </section>
 
       <section class="view view-done">

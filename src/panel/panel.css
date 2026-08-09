@@ -37,13 +37,32 @@ body[data-state="error"] .view-error {
   display: flex;
 }
 
-.view-transcribing,
 .view-done,
 .view-error {
   align-items: center;
   justify-content: center;
   gap: 12px;
   min-height: 100px;
+}
+
+/* Transcribing view: the frozen waveform of what was just said, read by a
+   moving head, laid out like the recording view. */
+.view-transcribing {
+  gap: 10px;
+  min-height: 100px;
+  justify-content: center;
+}
+
+.record-dot.grey {
+  background: rgba(255, 255, 255, 0.38);
+  box-shadow: 0 0 6px rgba(255, 255, 255, 0.25);
+  animation-duration: 1.6s;
+}
+
+#transcribeMeter {
+  width: 100%;
+  height: 36px;
+  display: block;
 }
 
 /* Recording view */

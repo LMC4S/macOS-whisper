@@ -5,6 +5,9 @@ const previewVolatile = document.querySelector("#previewVolatile");
 const timerText = document.querySelector("#timer");
 const meterCanvas = document.querySelector("#meter");
 const meterContext = meterCanvas.getContext("2d");
+const transcribeCanvas = document.querySelector("#transcribeMeter");
+const transcribeContext = transcribeCanvas.getContext("2d");
+const etaTimer = document.querySelector("#etaTimer");
 const stopButton = document.querySelector("#stopButton");
 const cancelButton = document.querySelector("#cancelButton");
 const shortcutHint = document.querySelector("#shortcutHint");
@@ -26,6 +29,10 @@ let pendingAction = null; // stop/cancel requested during microphone warm-up
 let warmupStart = 0;
 let captureLive = false;
 let dingContext = null;
+let envelope = []; // coarse level history of the recording, for the transcribe view
+let envelopeAt = 0;
+let transcribeAnim = null;
+let transcribeFrame = null;
 
 function setState(state) {
   body.dataset.state = state;
@@ -181,6 +188,14 @@ function startMeter(stream) {
       goLive();
     }
     if (captureLive) {
+      const now = performance.now();
+      if (now - envelopeAt >= 80) {
+        // Coarse envelope of the whole take; becomes the transcribe waveform.
+        envelopeAt = now;
+        let sum = 0;
+        for (let i = 0; i < bins.length; i += 1) sum += bins[i];
+        envelope.push(sum / bins.length / 255);
+      }
       renderBars(
         (i) => bins[Math.floor((i / BAR_COUNT) * bins.length * 0.7)] / 255,
         (_i, level) => 0.35 + level * 0.55
@@ -236,6 +251,108 @@ function playDing() {
 function dropDing() {
   dingContext?.close().catch(() => {});
   dingContext = null;
+}
+
+// --- Transcribing view: a reading head sweeps the recording's waveform ------
+
+// The recording's envelope, resampled to the meter's bar count and
+// normalized so the loudest moment reaches full height.
+function envelopeToBars() {
+  if (!envelope.length) return Array.from({ length: BAR_COUNT }, () => 0.15);
+  const levels = [];
+  for (let i = 0; i < BAR_COUNT; i += 1) {
+    const from = Math.floor((i / BAR_COUNT) * envelope.length);
+    const to = Math.max(from + 1, Math.floor(((i + 1) / BAR_COUNT) * envelope.length));
+    levels.push(Math.max(...envelope.slice(from, to)));
+  }
+  const peak = Math.max(...levels, 0.001);
+  return levels.map((level) => Math.max(0.08, (level / peak) * 0.95));
+}
+
+function transcribeProgress(anim, now) {
+  const linear = (now - anim.start) / anim.etaMs;
+  return linear < 0.9 ? linear : 0.9 + 0.08 * (1 - Math.exp(-(linear - 0.9) * 2.2));
+}
+
+function drawTranscribe(levels, progress) {
+  const { width, height } = transcribeCanvas;
+  transcribeContext.clearRect(0, 0, width, height);
+  const gap = 4;
+  const barWidth = (width - gap * (BAR_COUNT - 1)) / BAR_COUNT;
+  const front = progress * BAR_COUNT;
+  for (let i = 0; i < BAR_COUNT; i += 1) {
+    const x = i * (barWidth + gap);
+    // Ink: ghost bars ahead of the head, solid behind, 1.5-bar blend.
+    const t = Math.max(0, Math.min(1, (front - i) / 1.5));
+    const alpha = 0.22 + t * 0.63;
+    const barHeight = Math.max(4, levels[i] * height);
+    const y = (height - barHeight) / 2;
+    transcribeContext.fillStyle = `rgba(255, 255, 255, ${alpha})`;
+    transcribeContext.beginPath();
+    transcribeContext.roundRect(x, y, barWidth, barHeight, barWidth / 2);
+    transcribeContext.fill();
+  }
+  const headX = progress * width;
+  transcribeContext.save();
+  transcribeContext.shadowColor = "rgba(255, 255, 255, 0.85)";
+  transcribeContext.shadowBlur = 9;
+  transcribeContext.fillStyle = "rgba(255, 255, 255, 0.95)";
+  transcribeContext.fillRect(headX - 0.75, 2, 1.5, height - 4);
+  transcribeContext.restore();
+}
+
+function startTranscribeAnim(levels, etaMs) {
+  stopTranscribeAnim();
+  const anim = {
+    start: performance.now(),
+    etaMs,
+    finishing: false,
+    finishStart: 0,
+    finishFrom: 0,
+    resolve: null,
+  };
+  transcribeAnim = anim;
+  const loop = (now) => {
+    if (transcribeAnim !== anim) return;
+    let progress;
+    if (anim.finishing) {
+      // The response arrived: race the head to the end in 160ms.
+      progress = anim.finishFrom + (1 - anim.finishFrom) * Math.min(1, (now - anim.finishStart) / 160);
+    } else {
+      // Honest until 90% of the estimate, then hover until the real response.
+      progress = transcribeProgress(anim, now);
+      const remaining = anim.etaMs - (now - anim.start);
+      etaTimer.textContent = remaining > 0 ? `≈${Math.max(1, Math.ceil(remaining / 1000))}s` : "…";
+    }
+    drawTranscribe(levels, Math.min(progress, 1));
+    if (anim.finishing && progress >= 1) {
+      transcribeAnim = null;
+      anim.resolve?.();
+      return;
+    }
+    transcribeFrame = window.requestAnimationFrame(loop);
+  };
+  transcribeFrame = window.requestAnimationFrame(loop);
+}
+
+function finishTranscribeAnim() {
+  const anim = transcribeAnim;
+  if (!anim) return Promise.resolve();
+  return new Promise((resolve) => {
+    anim.resolve = resolve;
+    anim.finishing = true;
+    anim.finishStart = performance.now();
+    anim.finishFrom = Math.min(1, transcribeProgress(anim, anim.finishStart));
+  });
+}
+
+function stopTranscribeAnim() {
+  window.cancelAnimationFrame(transcribeFrame);
+  transcribeFrame = null;
+  const anim = transcribeAnim;
+  transcribeAnim = null;
+  anim?.resolve?.();
+  transcribeContext.clearRect(0, 0, transcribeCanvas.width, transcribeCanvas.height);
 }
 
 // --- Live transcript preview: stream 16 kHz PCM to the main process --------
@@ -317,6 +434,8 @@ function showError(message) {
 
 async function transcribe(file, durationMs) {
   setState("transcribing");
+  const plan = await window.verse.getTranscribePlan(durationMs).catch(() => null);
+  startTranscribeAnim(envelopeToBars(), plan?.etaMs || 2000);
   try {
     const audio = {
       bytes: new Uint8Array(await file.arrayBuffer()),
@@ -325,10 +444,12 @@ async function transcribe(file, durationMs) {
       durationMs,
     };
     await window.verse.completeRecording(audio);
+    await finishTranscribeAnim();
     body.dataset.state = "done";
     window.verse.reportRecorderState("idle");
     finishLater(1100);
   } catch (error) {
+    stopTranscribeAnim();
     const message = String(error?.message || error).replace(
       /^Error invoking remote method '[^']+': (Error: )?/u,
       ""
@@ -347,6 +468,9 @@ async function startRecording() {
   // across the meter — then flips with a ready tone when audio flows.
   pendingAction = null;
   captureLive = false;
+  envelope = [];
+  envelopeAt = 0;
+  stopTranscribeAnim();
   warmupStart = performance.now();
   timerText.textContent = "…";
   body.classList.add("warming");

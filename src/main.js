@@ -108,10 +108,85 @@ function entryAudioMs(entry) {
   return (wordCount(entry.text) / 150) * 60_000;
 }
 
+// Transcribe-time estimate for the panel's ETA. Learned per engine as a
+// two-parameter fit — elapsed ≈ overhead + rate × audio length — over the
+// most recent samples. A single elapsed/duration ratio would oscillate
+// forever when short and long recordings alternate (overhead dominates the
+// short ones); the intercept absorbs it instead.
+const DEFAULT_ETA_RATES = { openai: 0.35, mlx: 0.5, apple: 0.25 };
+const ETA_SAMPLE_LIMIT = 16;
+const ETA_MIN_SPREAD_MS = 2000; // std-dev of durations needed to trust a slope
+
+function normalizeEtaRates(raw) {
+  const rates = {};
+  for (const [engine, value] of Object.entries(raw || {})) {
+    const rate = Number(value);
+    if (Number.isFinite(rate) && rate > 0) rates[engine] = Math.min(rate, 5);
+  }
+  return rates;
+}
+
+function normalizeEtaSamples(raw) {
+  const samples = {};
+  for (const [engine, list] of Object.entries(raw || {})) {
+    if (!Array.isArray(list)) continue;
+    const valid = list
+      .filter(
+        (pair) =>
+          Array.isArray(pair) &&
+          Number.isFinite(pair[0]) &&
+          Number.isFinite(pair[1]) &&
+          pair[0] > 0 &&
+          pair[1] > 0
+      )
+      .slice(-ETA_SAMPLE_LIMIT);
+    if (valid.length) samples[engine] = valid;
+  }
+  return samples;
+}
+
+function transcribeEtaMs(stats, engine, durationMs) {
+  const duration = Number(durationMs);
+  if (!Number.isFinite(duration) || duration <= 0) return 2000;
+
+  const samples = stats.etaSamples[engine] || [];
+  if (samples.length >= 4) {
+    const n = samples.length;
+    const meanD = samples.reduce((sum, [d]) => sum + d, 0) / n;
+    const meanE = samples.reduce((sum, [, e]) => sum + e, 0) / n;
+    const varD = samples.reduce((sum, [d]) => sum + (d - meanD) ** 2, 0) / n;
+    // Only fit a slope when durations actually vary; a cluster of same-length
+    // recordings can't distinguish overhead from rate.
+    if (Math.sqrt(varD) >= ETA_MIN_SPREAD_MS) {
+      const cov = samples.reduce((sum, [d, e]) => sum + (d - meanD) * (e - meanE), 0) / n;
+      const rate = Math.max(0.02, Math.min(3, cov / varD));
+      const overhead = Math.max(0, Math.min(5000, meanE - rate * meanD));
+      return Math.max(1000, Math.min(30000, Math.round(overhead + rate * duration)));
+    }
+  }
+
+  // Fallback: single-ratio estimate (EMA-learned, else engine default).
+  const rate = stats.etaRates[engine] || DEFAULT_ETA_RATES[engine] || 0.4;
+  return Math.max(1000, Math.min(30000, Math.round(rate * duration + 400)));
+}
+
+async function recordTranscribeSample(engine, durationMs, elapsedMs) {
+  if (!Number.isFinite(durationMs) || durationMs < 1000 || elapsedMs <= 0) return;
+  const stats = await loadStats();
+  const samples = stats.etaSamples[engine] || [];
+  samples.push([Math.round(durationMs), Math.round(elapsedMs)]);
+  stats.etaSamples[engine] = samples.slice(-ETA_SAMPLE_LIMIT);
+  // Keep the ratio fallback fresh for the days before the fit has spread.
+  const sample = Math.max(0.05, Math.min(5, elapsedMs / durationMs));
+  const previous = stats.etaRates[engine] || DEFAULT_ETA_RATES[engine] || sample;
+  stats.etaRates[engine] = previous * 0.7 + sample * 0.3;
+  await saveStats(stats);
+}
+
 // Lifetime totals across every engine. History is capped at HISTORY_LIMIT
 // entries, so these counters are kept separately and only ever grow.
 function statsFromEntries(entries) {
-  const stats = { transcripts: 0, words: 0, audioMs: 0, openaiMs: 0 };
+  const stats = { transcripts: 0, words: 0, audioMs: 0, openaiMs: 0, etaRates: {}, etaSamples: {} };
   for (const entry of entries) {
     stats.transcripts += 1;
     stats.words += wordCount(entry.text);
@@ -135,6 +210,8 @@ async function loadStats() {
       words: Number(stats.words) || 0,
       audioMs: Number(stats.audioMs) || 0,
       openaiMs: Number(stats.openaiMs) || 0,
+      etaRates: normalizeEtaRates(stats.etaRates),
+      etaSamples: normalizeEtaSamples(stats.etaSamples),
     };
   } catch {
     // First run: seed from whatever history survives the cap. Anything
@@ -737,7 +814,7 @@ function openSettingsWindow() {
   }
   settingsWindow = new BrowserWindow({
     width: 460,
-    height: 680,
+    height: 700,
     resizable: false,
     minimizable: false,
     maximizable: false,
@@ -1073,6 +1150,13 @@ ipcMain.handle("history:stats", async () => {
   return loadStats();
 });
 
+// ETA for the panel's transcribing view.
+ipcMain.handle("transcribe:plan", async (_event, durationMs) => {
+  const settings = await loadSettings();
+  const stats = await loadStats();
+  return { etaMs: transcribeEtaMs(stats, settings.engine, durationMs) };
+});
+
 ipcMain.handle("history:delete", async (_event, id) => {
   const entries = await loadHistory();
   const next = entries.filter((entry) => entry.id !== id);
@@ -1118,12 +1202,16 @@ ipcMain.on("panel:hide", () => {
 ipcMain.handle("recorder:complete", async (_event, audio) => {
   const settings = await loadSettings();
   try {
+    const startedAt = Date.now();
     const result =
       settings.engine === "mlx"
         ? await transcribeWithMlx(audio, settings)
         : settings.engine === "apple"
           ? await transcribeWithApple(audio)
           : await transcribeWithOpenAi(audio, settings);
+    await recordTranscribeSample(settings.engine, Number(audio?.durationMs), Date.now() - startedAt).catch(
+      () => {}
+    );
     const text = String(result.text || "").trim();
     if (!text) throw new Error("The transcript came back empty.");
     clipboard.writeText(text);

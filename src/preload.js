@@ -31,5 +31,6 @@ contextBridge.exposeInMainWorld("verse", {
   sendPreviewAudio: (chunk) => ipcRenderer.send("preview:audio", chunk),
   reportRecorderState: (state) => ipcRenderer.send("recorder:state", state),
   completeRecording: (audio) => ipcRenderer.invoke("recorder:complete", audio),
+  getTranscribePlan: (durationMs) => ipcRenderer.invoke("transcribe:plan", durationMs),
   hidePanel: () => ipcRenderer.send("panel:hide"),
 });
