@@ -2,7 +2,7 @@
 
 A lightweight macOS app for voice transcription that stays out of the way: a quote mark in the menu bar, a translucent panel while recording, and finished text wherever the cursor sits. One shortcut (**⌥Space** by default, configurable) starts and ends a recording; a soft tone marks the moment the microphone is live, and the transcript lands on the clipboard and is pasted into the focused text field. Esc cancels. Three engines to choose from: Whisper through the OpenAI API, Whisper on-device with a local MLX model, or Apple's own on-device speech models.
 
-![Recording panel under the menu bar](docs/hero.png)
+![One dictation, start to finish: the panel warms up, records, and a reading head sweeps the waveform while transcribing](docs/hero.gif)
 
 The menu bar mark shows the current state: **”** idle, a red dot recording, **…** transcribing. While transcribing, the panel shows the waveform of what you just said with a reading head sweeping across it and an ETA learned from your own history — no spinners. Unlike system dictation, nothing is gone after the paste: every transcript is kept in a searchable History window, with lifetime totals for words, audio time, and API cost.
 
