@@ -1,10 +1,10 @@
 # Verse — Whisper that lives in the menu bar
 
-A lightweight macOS app for voice transcription that stays out of the way: a quote mark in the menu bar, a translucent panel while recording, and finished text wherever the cursor sits. One shortcut (**⌥Space** by default, configurable) starts and ends a recording; the transcript lands on the clipboard and is pasted into the focused text field. Esc cancels. Three engines to choose from: Whisper through the OpenAI API, Whisper on-device with a local MLX model, or Apple's own on-device speech models.
+A lightweight macOS app for voice transcription that stays out of the way: a quote mark in the menu bar, a translucent panel while recording, and finished text wherever the cursor sits. One shortcut (**⌥Space** by default, configurable) starts and ends a recording; a soft tone marks the moment the microphone is live, and the transcript lands on the clipboard and is pasted into the focused text field. Esc cancels. Three engines to choose from: Whisper through the OpenAI API, Whisper on-device with a local MLX model, or Apple's own on-device speech models.
 
 ![Recording panel under the menu bar](docs/hero.png)
 
-The menu bar mark shows the current state: **”** idle, a red dot recording, **…** transcribing. Unlike system dictation, nothing is gone after the paste: every transcript is kept in a searchable History window, with running totals for words, audio time, and API cost.
+The menu bar mark shows the current state: **”** idle, a red dot recording, **…** transcribing. While transcribing, the panel shows the waveform of what you just said with a reading head sweeping across it and an ETA learned from your own history — no spinners. Unlike system dictation, nothing is gone after the paste: every transcript is kept in a searchable History window, with lifetime totals for words, audio time, and API cost.
 
 ![Settings and History windows](docs/windows.png)
 
@@ -65,8 +65,8 @@ macOS has built-in dictation (the 🎤 / F5 key) that types at the cursor and ru
 
 - Whisper holds up on accents, background noise, technical vocabulary, and about 100 languages (Apple's dictation supports roughly 30 locales).
 - A choice of engine — OpenAI's API or a fully offline local model — and the model itself is swappable.
-- Every transcript is kept: searchable history with word, duration, and cost totals, one click to copy again.
-- A visible recording panel with cancel, a shortcut of your choosing, and the same behavior in every app.
+- Every transcript is kept: searchable history with lifetime word, duration, and cost totals, one click to copy again.
+- A visible recording panel with cancel, live transcription progress with an ETA, a shortcut of your choosing, and the same behavior in every app.
 
 ## Privacy
 
