@@ -22,6 +22,10 @@ let audioContext = null;
 let analyser = null;
 let meterFrame = null;
 let hideTimer = null;
+let pendingAction = null; // stop/cancel requested during microphone warm-up
+let warmupStart = 0;
+let captureLive = false;
+let dingContext = null;
 
 function setState(state) {
   body.dataset.state = state;
@@ -105,8 +109,60 @@ function stopTimer() {
   timer = null;
 }
 
+const BAR_COUNT = 28;
+const WARMUP_SWEEP_MS = 650; // pace of the power-on sweep ≈ a cold mic's wake time
+const CAPTURE_LIVE_TIMEOUT_MS = 1500; // digital silence still counts as live eventually
+
+function renderBars(levelAt, alphaAt) {
+  const { width, height } = meterCanvas;
+  meterContext.clearRect(0, 0, width, height);
+  const gap = 4;
+  const barWidth = (width - gap * (BAR_COUNT - 1)) / BAR_COUNT;
+  for (let index = 0; index < BAR_COUNT; index += 1) {
+    const level = levelAt(index);
+    const barHeight = Math.max(4, level * height);
+    const x = index * (barWidth + gap);
+    const y = (height - barHeight) / 2;
+    meterContext.fillStyle = `rgba(255, 255, 255, ${alphaAt(index, level)})`;
+    meterContext.beginPath();
+    meterContext.roundRect(x, y, barWidth, barHeight, barWidth / 2);
+    meterContext.fill();
+  }
+}
+
+// Power-on sweep drawn while the microphone wakes: bars ignite left to
+// right, paced to a typical cold start, and hold lit if the mic is slower.
+function renderSweepFrame() {
+  const progress = ((performance.now() - warmupStart) / WARMUP_SWEEP_MS) * BAR_COUNT;
+  const t = performance.now() / 1000;
+  renderBars(
+    (i) => (i < progress ? 0.3 + 0.08 * Math.sin(t * 4 + i) : 0.04),
+    (i) => (i < progress ? 0.45 + 0.3 * Math.max(0, 1 - (progress - i) / 6) : 0.16)
+  );
+}
+
+function startSweep() {
+  const loop = () => {
+    renderSweepFrame();
+    meterFrame = window.requestAnimationFrame(loop);
+  };
+  window.cancelAnimationFrame(meterFrame);
+  meterFrame = window.requestAnimationFrame(loop);
+}
+
+// The moment real audio flows: ready tone, red dot, timer starts. Recording
+// duration is measured from here, so the silent warm-up isn't counted.
+function goLive() {
+  captureLive = true;
+  body.classList.remove("warming");
+  playDing();
+  startTimer();
+}
+
 function startMeter(stream) {
-  audioContext = new AudioContext();
+  // A silent sink: the meter only analyses the mic; the default sink would
+  // needlessly open the output device (slow to wake on USB speakers).
+  audioContext = new AudioContext({ sinkId: { type: "none" } });
   const source = audioContext.createMediaStreamSource(stream);
   analyser = audioContext.createAnalyser();
   analyser.fftSize = 512;
@@ -114,28 +170,72 @@ function startMeter(stream) {
   source.connect(analyser);
 
   const bins = new Uint8Array(analyser.frequencyBinCount);
-  const barCount = 28;
+  const attachedAt = performance.now();
 
   const draw = () => {
     analyser.getByteFrequencyData(bins);
-    const { width, height } = meterCanvas;
-    meterContext.clearRect(0, 0, width, height);
-    const gap = 4;
-    const barWidth = (width - gap * (barCount - 1)) / barCount;
-    for (let index = 0; index < barCount; index += 1) {
-      const bin = Math.floor((index / barCount) * bins.length * 0.7);
-      const level = bins[bin] / 255;
-      const barHeight = Math.max(4, level * height);
-      const x = index * (barWidth + gap);
-      const y = (height - barHeight) / 2;
-      meterContext.fillStyle = `rgba(255, 255, 255, ${0.35 + level * 0.55})`;
-      meterContext.beginPath();
-      meterContext.roundRect(x, y, barWidth, barHeight, barWidth / 2);
-      meterContext.fill();
+    if (
+      !captureLive &&
+      (bins.some((bin) => bin > 0) || performance.now() - attachedAt > CAPTURE_LIVE_TIMEOUT_MS)
+    ) {
+      goLive();
+    }
+    if (captureLive) {
+      renderBars(
+        (i) => bins[Math.floor((i / BAR_COUNT) * bins.length * 0.7)] / 255,
+        (_i, level) => 0.35 + level * 0.55
+      );
+    } else {
+      renderSweepFrame();
     }
     meterFrame = window.requestAnimationFrame(draw);
   };
+  window.cancelAnimationFrame(meterFrame);
   meterFrame = window.requestAnimationFrame(draw);
+}
+
+// --- Ready tone ------------------------------------------------------------
+
+// Created when the warm-up begins so the output device wakes in parallel
+// with the microphone; the tone then plays on time instead of waiting for
+// USB speakers to spin up.
+function warmDing() {
+  dropDing();
+  try {
+    dingContext = new AudioContext();
+  } catch {
+    dingContext = null;
+  }
+}
+
+function playDing() {
+  const context = dingContext;
+  dingContext = null;
+  if (!context) return;
+  try {
+    const t = context.currentTime;
+    for (const [frequency, peak] of [
+      [1318.5, 0.1],
+      [1975.5, 0.045],
+    ]) {
+      const oscillator = context.createOscillator();
+      const gain = context.createGain();
+      oscillator.type = "sine";
+      oscillator.frequency.value = frequency;
+      gain.gain.setValueAtTime(0.0001, t);
+      gain.gain.exponentialRampToValueAtTime(peak, t + 0.012);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.28);
+      oscillator.connect(gain).connect(context.destination);
+      oscillator.start(t);
+      oscillator.stop(t + 0.3);
+    }
+    setTimeout(() => context.close().catch(() => {}), 600);
+  } catch {}
+}
+
+function dropDing() {
+  dingContext?.close().catch(() => {});
+  dingContext = null;
 }
 
 // --- Live transcript preview: stream 16 kHz PCM to the main process --------
@@ -143,7 +243,9 @@ function startMeter(stream) {
 function startPreviewPump(stream) {
   previewFinal.textContent = "";
   previewVolatile.textContent = "";
-  previewContext = new AudioContext({ sampleRate: 16000 });
+  // Silent sink here too: this context only pumps mic samples to the main
+  // process, and must not wake the output device (~450ms on USB speakers).
+  previewContext = new AudioContext({ sampleRate: 16000, sinkId: { type: "none" } });
   const source = previewContext.createMediaStreamSource(stream);
   const processor = previewContext.createScriptProcessor(4096, 1, 1);
   const mute = previewContext.createGain();
@@ -193,6 +295,8 @@ function stopMeter() {
     analyser = null;
   }
   meterContext.clearRect(0, 0, meterCanvas.width, meterCanvas.height);
+  body.classList.remove("warming");
+  dropDing(); // no-op if the ready tone already played
 }
 
 function finishLater(delayMs) {
@@ -204,6 +308,7 @@ function finishLater(delayMs) {
 }
 
 function showError(message) {
+  stopMeter(); // also halts a still-running warm-up sweep
   errorText.textContent = message || "Something went wrong.";
   body.dataset.state = "error";
   window.verse.reportRecorderState("idle");
@@ -235,6 +340,19 @@ async function transcribe(file, durationMs) {
 async function startRecording() {
   if (mediaRecorder && mediaRecorder.state === "recording") return;
   window.clearTimeout(hideTimer);
+  // Paint the recording view before waiting on the microphone: after a few
+  // idle minutes the audio device takes ~half a second to warm up, and a
+  // blank panel reads as lag. Until capture is live the panel shows a
+  // distinct warming state — grey dot, dim title, "…" timer, power-on sweep
+  // across the meter — then flips with a ready tone when audio flows.
+  pendingAction = null;
+  captureLive = false;
+  warmupStart = performance.now();
+  timerText.textContent = "…";
+  body.classList.add("warming");
+  setState("recording");
+  startSweep();
+  warmDing();
   try {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     const mimeType = recordingType();
@@ -279,8 +397,9 @@ async function startRecording() {
     });
 
     mediaRecorder.start();
-    setState("recording");
-    startTimer();
+    // Baseline for durationMs in case recording stops before capture goes
+    // live; goLive() re-anchors it to the first real audio.
+    startedAt = Date.now();
     startMeter(stream);
     if (previewOn) {
       try {
@@ -289,6 +408,10 @@ async function startRecording() {
         // Preview is best effort; recording continues without it.
       }
     }
+    // A stop or cancel that arrived while the microphone was warming up.
+    if (pendingAction === "stop") stopRecording();
+    else if (pendingAction === "cancel") cancelRecording();
+    pendingAction = null;
   } catch (error) {
     showError(error?.message || "Microphone access was blocked.");
   }
@@ -297,6 +420,8 @@ async function startRecording() {
 function stopRecording() {
   if (mediaRecorder && mediaRecorder.state === "recording") {
     mediaRecorder.stop();
+  } else if (body.dataset.state === "recording") {
+    pendingAction = "stop";
   }
 }
 
@@ -304,6 +429,8 @@ function cancelRecording() {
   if (mediaRecorder && mediaRecorder.state === "recording") {
     cancelled = true;
     mediaRecorder.stop();
+  } else if (body.dataset.state === "recording") {
+    pendingAction = "cancel";
   }
 }
 

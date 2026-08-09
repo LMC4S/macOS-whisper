@@ -1,8 +1,8 @@
 // electron-builder afterPack hook: drop SwiftShader (Chromium's software
 // Vulkan fallback for WebGL) from the Electron Framework. Verse renders no
-// WebGL and runs with hardware acceleration disabled, so it is dead weight
-// (~16 MB installed). The framework is re-signed ad hoc afterwards so its
-// code seal stays valid on arm64.
+// WebGL, and on a real GPU Chromium never falls back to it, so it is dead
+// weight (~16 MB installed). The framework is re-signed ad hoc afterwards so
+// its code seal stays valid on arm64.
 const { execFileSync } = require("node:child_process");
 const fs = require("node:fs");
 const path = require("node:path");

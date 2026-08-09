@@ -74,10 +74,6 @@ function migrateLegacyUserData() {
 
 migrateLegacyUserData();
 
-// The UI is native vibrancy plus a small 2D canvas; software rendering covers
-// it, and skipping the GPU helper process saves a good chunk of idle memory.
-app.disableHardwareAcceleration();
-
 let tray = null;
 let panelWindow = null;
 let settingsWindow = null;
@@ -92,6 +88,61 @@ function settingsPath() {
 
 function historyPath() {
   return path.join(app.getPath("userData"), "history.json");
+}
+
+function statsPath() {
+  return path.join(app.getPath("userData"), "stats.json");
+}
+
+const CJK_PATTERN = /[぀-ヿ㐀-䶿一-鿿가-힯]/gu;
+
+function wordCount(text) {
+  const cjkCharacters = (text.match(CJK_PATTERN) || []).length;
+  const spacedWords = (text.replace(CJK_PATTERN, " ").match(/\S+/gu) || []).length;
+  return cjkCharacters + spacedWords;
+}
+
+function entryAudioMs(entry) {
+  if (entry.durationMs) return entry.durationMs;
+  // Entries older than duration tracking: assume a 150 words-per-minute pace.
+  return (wordCount(entry.text) / 150) * 60_000;
+}
+
+// Lifetime totals across every engine. History is capped at HISTORY_LIMIT
+// entries, so these counters are kept separately and only ever grow.
+function statsFromEntries(entries) {
+  const stats = { transcripts: 0, words: 0, audioMs: 0, openaiMs: 0 };
+  for (const entry of entries) {
+    stats.transcripts += 1;
+    stats.words += wordCount(entry.text);
+    stats.audioMs += entry.durationMs || 0;
+    if (entry.engine === "openai") stats.openaiMs += entryAudioMs(entry);
+  }
+  return stats;
+}
+
+async function saveStats(stats) {
+  await fs.mkdir(path.dirname(statsPath()), { recursive: true });
+  await fs.writeFile(statsPath(), JSON.stringify(stats, null, 2) + "\n", "utf8");
+}
+
+async function loadStats() {
+  try {
+    const raw = await fs.readFile(statsPath(), "utf8");
+    const stats = JSON.parse(raw);
+    return {
+      transcripts: Number(stats.transcripts) || 0,
+      words: Number(stats.words) || 0,
+      audioMs: Number(stats.audioMs) || 0,
+      openaiMs: Number(stats.openaiMs) || 0,
+    };
+  } catch {
+    // First run: seed from whatever history survives the cap. Anything
+    // already pruned is gone, so the lifetime clock starts from here.
+    const stats = statsFromEntries(await loadHistory());
+    await saveStats(stats);
+    return stats;
+  }
 }
 
 async function loadHistory() {
@@ -121,9 +172,17 @@ async function addHistoryEntry({ text, source, engine, durationMs }) {
     createdAt: new Date().toISOString(),
     ...(Number.isFinite(duration) && duration > 0 ? { durationMs: Math.round(duration) } : {}),
   };
+  // Load (and, on first run, seed) stats before the new entry lands in
+  // history, so seeding never counts it twice.
+  const stats = await loadStats();
   const entries = await loadHistory();
   entries.unshift(entry);
   await saveHistory(entries.slice(0, HISTORY_LIMIT));
+  stats.transcripts += 1;
+  stats.words += wordCount(entry.text);
+  stats.audioMs += entry.durationMs || 0;
+  if (entry.engine === "openai") stats.openaiMs += entryAudioMs(entry);
+  await saveStats(stats);
   return entry;
 }
 
@@ -1008,6 +1067,10 @@ ipcMain.handle("localEngine:open", async () => {
 
 ipcMain.handle("history:list", async () => {
   return loadHistory();
+});
+
+ipcMain.handle("history:stats", async () => {
+  return loadStats();
 });
 
 ipcMain.handle("history:delete", async (_event, id) => {

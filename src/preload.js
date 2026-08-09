@@ -17,6 +17,7 @@ contextBridge.exposeInMainWorld("verse", {
 
   // History window
   getHistory: () => ipcRenderer.invoke("history:list"),
+  getStats: () => ipcRenderer.invoke("history:stats"),
   deleteHistoryEntry: (id) => ipcRenderer.invoke("history:delete", id),
   clearHistory: () => ipcRenderer.invoke("history:clear"),
   copyText: (text) => ipcRenderer.invoke("clipboard:writeText", text),

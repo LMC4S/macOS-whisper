@@ -5,6 +5,7 @@ const list = document.querySelector("#list");
 const emptyText = document.querySelector("#emptyText");
 
 let entries = [];
+let stats = null;
 
 function formatTime(iso) {
   const date = new Date(iso);
@@ -21,14 +22,6 @@ function formatTime(iso) {
   return `${date.toLocaleDateString([], { month: "short", day: "numeric" })} ${time}`;
 }
 
-const CJK_PATTERN = /[぀-ヿ㐀-䶿一-鿿가-힯]/gu;
-
-function wordCount(text) {
-  const cjkCharacters = (text.match(CJK_PATTERN) || []).length;
-  const spacedWords = (text.replace(CJK_PATTERN, " ").match(/\S+/gu) || []).length;
-  return cjkCharacters + spacedWords;
-}
-
 function formatTotalDuration(ms) {
   const totalSeconds = Math.round(ms / 1000);
   const hours = Math.floor(totalSeconds / 3600);
@@ -41,21 +34,14 @@ function formatTotalDuration(ms) {
 
 const API_COST_PER_MINUTE = 0.006; // OpenAI whisper-1 pricing, USD
 
-function entryMinutes(entry) {
-  if (entry.durationMs) return entry.durationMs / 60_000;
-  // Entries older than duration tracking: assume a 150 words-per-minute pace.
-  return wordCount(entry.text) / 150;
-}
-
-function statsLine(items) {
-  const parts = [`${items.length} transcript${items.length === 1 ? "" : "s"}`];
-  const words = items.reduce((sum, entry) => sum + wordCount(entry.text), 0);
-  parts.push(`${words.toLocaleString()} word${words === 1 ? "" : "s"}`);
-  const audioMs = items.reduce((sum, entry) => sum + (entry.durationMs || 0), 0);
-  if (audioMs > 0) parts.push(`${formatTotalDuration(audioMs)} of audio`);
-  const cost = items
-    .filter((entry) => entry.engine === "openai")
-    .reduce((sum, entry) => sum + entryMinutes(entry), 0) * API_COST_PER_MINUTE;
+// Lifetime totals from the main process, not sums over the visible list —
+// history keeps only the latest 200 entries, but these never shrink.
+function statsLine() {
+  if (!stats) return `${entries.length} transcript${entries.length === 1 ? "" : "s"}`;
+  const parts = [`${stats.transcripts} transcript${stats.transcripts === 1 ? "" : "s"}`];
+  parts.push(`${stats.words.toLocaleString()} word${stats.words === 1 ? "" : "s"}`);
+  if (stats.audioMs > 0) parts.push(`${formatTotalDuration(stats.audioMs)} of audio`);
+  const cost = (stats.openaiMs / 60_000) * API_COST_PER_MINUTE;
   if (cost > 0) {
     parts.push(cost < 0.01 ? "< $0.01 API cost" : `≈ $${cost.toFixed(2)} API cost`);
   }
@@ -73,7 +59,7 @@ function render() {
   emptyText.textContent = query ? "No matches." : "No transcripts yet.";
   countText.textContent = query
     ? `${visible.length} of ${entries.length} transcripts`
-    : statsLine(entries);
+    : statsLine();
 
   for (const entry of visible) {
     const item = document.createElement("li");
@@ -125,7 +111,7 @@ function render() {
 }
 
 async function load() {
-  entries = await window.verse.getHistory();
+  [entries, stats] = await Promise.all([window.verse.getHistory(), window.verse.getStats()]);
   render();
 }
 

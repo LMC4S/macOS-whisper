@@ -61,6 +61,9 @@ body[data-state="error"] .view-error {
   background: #ff453a;
   box-shadow: 0 0 8px rgba(255, 69, 58, 0.8);
   animation: pulse 1.4s ease-in-out infinite;
+  transition:
+    background 0.25s ease,
+    box-shadow 0.25s ease;
 }
 
 @keyframes pulse {
@@ -79,6 +82,19 @@ body[data-state="error"] .view-error {
   font-size: 13px;
   font-weight: 600;
   letter-spacing: 0.01em;
+  transition: color 0.25s ease;
+}
+
+/* Microphone warm-up: grey dot, dim title, sweep on the meter. Flips to the
+   full recording look the moment capture is live. */
+body.warming .record-dot {
+  background: rgba(255, 255, 255, 0.38);
+  box-shadow: 0 0 6px rgba(255, 255, 255, 0.25);
+  animation-duration: 1.9s;
+}
+
+body.warming .title {
+  color: rgba(255, 255, 255, 0.6);
 }
 
 .timer {
