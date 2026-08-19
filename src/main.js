@@ -27,7 +27,10 @@ const FALLBACK_SHORTCUT = "Control+Alt+Space";
 
 // 🎤 key option: remap the dictation key (consumer usage 0xCF) to F13 with
 // hidutil, so it becomes a bindable plain key. A LaunchAgent reapplies the
-// mapping at login; disabling removes both.
+// mapping at login; disabling removes both. The F13 binding lives alongside
+// the regular shortcut rather than replacing it — usage 0xCF only exists on
+// the built-in keyboard, so an external keyboard's shortcut never collides
+// with it and both can stay registered at once.
 const MIC_KEY_SHORTCUT = "F13";
 const MIC_KEY_AGENT_LABEL = "app.verse.mic-key";
 const MIC_KEY_MAPPING = JSON.stringify({
@@ -81,6 +84,7 @@ let historyWindow = null;
 let recorderState = "idle"; // idle | recording | transcribing
 let activeShortcut = null;
 let escapeRegistered = false;
+let micKeyRegistered = false;
 
 function settingsPath() {
   return path.join(app.getPath("userData"), "settings.json");
@@ -1023,6 +1027,20 @@ function registerToggleShortcut(preferred) {
   return null;
 }
 
+function syncMicKeyShortcut() {
+  const wanted = micKeyEnabled() && activeShortcut !== MIC_KEY_SHORTCUT;
+  if (wanted && !micKeyRegistered) {
+    try {
+      micKeyRegistered = globalShortcut.register(MIC_KEY_SHORTCUT, () => toggleRecording());
+    } catch {
+      micKeyRegistered = false;
+    }
+  } else if (!wanted && micKeyRegistered) {
+    globalShortcut.unregister(MIC_KEY_SHORTCUT);
+    micKeyRegistered = false;
+  }
+}
+
 function pasteIntoFrontApp() {
   return new Promise((resolve) => {
     const child = spawn("/usr/bin/osascript", [
@@ -1059,29 +1077,13 @@ ipcMain.handle("settings:saveTranscription", async (_event, payload) => {
   return publicSettings(settings);
 });
 
-ipcMain.handle("settings:saveShortcut", async (_event, accelerator) => {
-  const next = String(accelerator || "").trim();
-  if (!next) throw new Error("Press a key combination first.");
-
-  if (activeShortcut) globalShortcut.unregister(activeShortcut);
-  let registered = false;
-  try {
-    registered = globalShortcut.register(next, () => toggleRecording());
-  } catch {
-    registered = false;
-  }
-  if (!registered) {
-    if (activeShortcut) globalShortcut.register(activeShortcut, () => toggleRecording());
-    throw new Error(`Could not register ${shortcutLabel(next)} — it may be taken by another app.`);
-  }
-
-  activeShortcut = next;
-  const settings = await saveSettings({ shortcut: next });
-  rebuildTrayMenu();
-  return publicSettings(settings);
-});
-
 async function rebindShortcut(accelerator) {
+  // The mic-key binding may hold the accelerator we are about to claim;
+  // release it first and re-sync afterwards.
+  if (micKeyRegistered) {
+    globalShortcut.unregister(MIC_KEY_SHORTCUT);
+    micKeyRegistered = false;
+  }
   if (activeShortcut) globalShortcut.unregister(activeShortcut);
   let registered = false;
   try {
@@ -1091,22 +1093,32 @@ async function rebindShortcut(accelerator) {
   }
   if (!registered) {
     if (activeShortcut) globalShortcut.register(activeShortcut, () => toggleRecording());
-    throw new Error(`Could not register ${shortcutLabel(accelerator)}.`);
+    syncMicKeyShortcut();
+    throw new Error(`Could not register ${shortcutLabel(accelerator)} — it may be taken by another app.`);
   }
   activeShortcut = accelerator;
   const settings = await saveSettings({ shortcut: accelerator });
+  syncMicKeyShortcut();
   rebuildTrayMenu();
   return settings;
 }
 
+ipcMain.handle("settings:saveShortcut", async (_event, accelerator) => {
+  const next = String(accelerator || "").trim();
+  if (!next) throw new Error("Press a key combination first.");
+  const settings = await rebindShortcut(next);
+  return publicSettings(settings);
+});
+
 ipcMain.handle("micKey:set", async (_event, enabled) => {
   await setMicKey(Boolean(enabled));
   let settings = await loadSettings();
-  if (enabled) {
-    settings = await rebindShortcut(MIC_KEY_SHORTCUT);
-  } else if (settings.shortcut === MIC_KEY_SHORTCUT) {
+  if (!enabled && settings.shortcut === MIC_KEY_SHORTCUT) {
+    // Legacy state from when 🎤 replaced the shortcut: F13 has no physical
+    // key once the remap is gone, so fall back to the default.
     settings = await rebindShortcut(DEFAULT_SHORTCUT);
   }
+  syncMicKeyShortcut();
   return publicSettings(settings);
 });
 
@@ -1257,6 +1269,7 @@ app.whenReady().then(async () => {
   createPanelWindow();
   const settings = await loadSettings();
   activeShortcut = registerToggleShortcut(settings.shortcut || DEFAULT_SHORTCUT);
+  syncMicKeyShortcut();
   rebuildTrayMenu();
 });
 

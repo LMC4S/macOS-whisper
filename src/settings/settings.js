@@ -212,7 +212,7 @@ micKeyToggle.addEventListener("change", async () => {
     applySettings(settings);
     setStatus(
       settings.micKeyEnabled
-        ? "The dictation key now starts recording."
+        ? "The dictation key now starts recording, alongside the shortcut."
         : "The dictation key is back to Apple Dictation."
     );
   } catch (error) {
